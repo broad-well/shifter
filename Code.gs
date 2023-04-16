@@ -64,7 +64,7 @@ function validateParams() {
     const paramHeaderToIndex = mapHeaderToIndex(params[0])
 
     const expectedShifts = []
-    for (let row = 1; params[row][0] != ''; ++row) {
+    for (let row = 1; row < params.length && params[row][0] != ''; ++row) {
       expectedShifts.push(params[row][paramHeaderToIndex['Shift']])
     }
 
