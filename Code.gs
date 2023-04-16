@@ -115,15 +115,15 @@ function validateParams() {
     const resDisplayColumnIndex = responseDataHeaders[displayColumnRange.getDisplayValue()]
     const validAvailability = new Set(['Unavailable', 'Available', 'Preferred'])
     const idSet = new Set()
-    for (let row = 1; row < responseData.length; ++row) {
+    for (let row = 1; row < responseData.length && responseData[row].join('').trim().length > 0; ++row) {
       const rowId = responseData[row][resIdColumnIndex].toString()
       if (rowId.trim().length === 0) {
         responses.getRange(row + 1, resIdColumnIndex + 1).activate()
-        throw new Error(`The selected ID value is missing`)
+        throw new Error(`The selected worker ID is missing`)
       }
       if (responseData[row][resDisplayColumnIndex].toString().trim().length === 0) {
         responses.getRange(row + 1, resDisplayColumnIndex + 1).activate()
-        throw new Error(`The selected display name value is missing`)
+        throw new Error(`The selected worker display name value is missing`)
       }
       let availableSlots = 0
       for (const shift of expectedShifts) {
@@ -131,7 +131,7 @@ function validateParams() {
         const availability = responseData[row][column]
         if (!validAvailability.has(availability)) {
           responses.getRange(row + 1, column + 1).activate()
-          throw new Error(`The selected availability value is missing`)
+          throw new Error(`The selected worker availability value is invalid. Valid values are: ${Array.from(validAvailability).join(', ')}`)
         }
         if (availability !== 'Unavailable') ++availableSlots
       }
@@ -149,7 +149,7 @@ function validateParams() {
 
     SpreadsheetApp.getUi().alert('Shifter says...', `Looks good! 👍`, SpreadsheetApp.getUi().ButtonSet.OK)
   } catch (e) {
-    SpreadsheetApp.getUi().alert('Shifter says...', `${e}`, SpreadsheetApp.getUi().ButtonSet.OK)
+    SpreadsheetApp.getUi().alert('Shifter says...', `${e}\n\n${e?.stack}`, SpreadsheetApp.getUi().ButtonSet.OK)
   }
 }
 
