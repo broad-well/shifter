@@ -6,8 +6,8 @@ function onOpen() {
     .addToUi()
 }
 
-function mapHeaderToIndex(row) {
-  const paramHeaderToIndex = {}
+function mapHeaderToIndex(row: string[]): {[header: string]: number} {
+  const paramHeaderToIndex: {[header: string]: number} = {}
   for (let i = 0; i < row.length; ++i) {
     paramHeaderToIndex[row[i]] = i
   }
@@ -63,7 +63,7 @@ function validateParams() {
     
     const paramHeaderToIndex = mapHeaderToIndex(params[0])
 
-    const expectedShifts = []
+    const expectedShifts: string[] = []
     for (let row = 1; row < params.length && params[row][0] != ''; ++row) {
       expectedShifts.push(params[row][paramHeaderToIndex['Shift']])
     }
@@ -153,13 +153,23 @@ function validateParams() {
   }
 }
 
+interface ShiftParams {
+  name: string
+  category: string
+  min: number // int
+  max: number // int
+  hours: number // float
+  outputRange: GoogleAppsScript.Spreadsheet.Range
+}
+
+// Precondition: Already validated
 function collectParams() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet()
-  const outputSheet = spreadsheet.getSheetByName('Shifter')
-  const paramsRange = spreadsheet.getRangeByName('Shifts')
+  const outputSheet = spreadsheet.getSheetByName('Shifter')!
+  const paramsRange = spreadsheet.getRangeByName('Shifts')!
   const paramsData = paramsRange.getDisplayValues()
   const paramHeaderToIndex = mapHeaderToIndex(paramsData[0])
-  const params = {}
+  const params: {[shiftName: string]: ShiftParams} = {}
   for (let row = 1; paramsData[row][0] != ''; ++row) {
     const param = {
       name: paramsData[row][paramHeaderToIndex['Shift']],
@@ -174,13 +184,10 @@ function collectParams() {
   return params
 }
 
-/**
- * @return {string[][]}
- */
-function collectResponseArray() {
+function collectResponseArray(): string[][] {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet()
-    const constraintRange = spreadsheet.getRangeByName('AvailabilityResponses')
-    const responses = spreadsheet.getSheetByName(constraintRange.getDisplayValue())
+    const constraintRange = spreadsheet.getRangeByName('AvailabilityResponses')!
+    const responses = spreadsheet.getSheetByName(constraintRange.getDisplayValue())!
     return responses.getDataRange().getDisplayValues()
 }
 
@@ -188,135 +195,124 @@ function getVariableName(person, shift) {
   return `${person}_${shift}`
 }
 
-/**
- * @return {{idColumn: string, displayColumn: string, preferredGreen: boolean, minHours: number, maxHours: number}}
- */
+interface Config {
+  idColumn: string
+  displayColumn: string
+  preferredGreen: boolean
+  minHours: number
+  maxHours: number
+}
+
 function collectConfig() {
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet()
-  const idColumn = spreadsheet.getRangeByName('IdColumn').getDisplayValue()
-  const displayColumn = spreadsheet.getRangeByName('DisplayColumn').getDisplayValue()
-  const preferredGreenStr = spreadsheet.getRangeByName('PreferredGreen').getDisplayValue()
+  const idColumn = spreadsheet.getRangeByName('IdColumn')!.getDisplayValue()
+  const displayColumn = spreadsheet.getRangeByName('DisplayColumn')!.getDisplayValue()
+  const preferredGreenStr = spreadsheet.getRangeByName('PreferredGreen')!.getDisplayValue()
   const preferredGreen = !['0', '', 'FALSE'].includes(preferredGreenStr.toString().toUpperCase())
-  const minHours = spreadsheet.getRangeByName('MinHours').getValue()
-  const maxHours = spreadsheet.getRangeByName('MaxHours').getValue()
+  const minHours = spreadsheet.getRangeByName('MinHours')!.getValue()
+  const maxHours = spreadsheet.getRangeByName('MaxHours')!.getValue()
   return {idColumn, displayColumn, preferredGreen, minHours, maxHours}
 }
 
-/**
- * @param opt {LinearOptimizationService.LinearOptimizationEngine}
- * @param responses {string[][]}
- * @param headers {{[key: string]: number}}
- * @param params {{[name: string]: any}}
- * @param config {{idColumn: string}}
- */
-function makeAvailableVariables(opt, responses, headers, params, config) {
-  for (let row = 1; row < responses.length; ++row) {
-    for (const paramName of Object.keys(params)) {
-      const response = responses[row][headers[paramName]]
-      const varName = getVariableName(responses[row][headers[config.idColumn]], paramName)
-      if (response !== 'Unavailable') {
-        opt.addVariable(varName, 0, 1, LinearOptimizationService.VariableType.INTEGER)
+class ShifterProblem {
+  shifts: {[shiftName: string]: ShiftParams}
+  responses: string[][]
+  opt: GoogleAppsScript.Optimization.LinearOptimizationEngine
+  config: Config
+  responseHeaders: {[header: string]: number}
+
+  constructor() {
+    this.shifts = collectParams()
+    this.responses = collectResponseArray()
+    this.opt = LinearOptimizationService.createEngine()
+    this.config = collectConfig()
+    this.opt.setMaximization()
+    this.responseHeaders = mapHeaderToIndex(this.responses[0])
+  }
+
+  makeAvailabilityVariables() {
+    for (let row = 1; row < this.responses.length; ++row) {
+      for (const paramName of Object.keys(this.shifts)) {
+        const response = this.responses[row][this.responseHeaders[paramName]]
+        const varName = getVariableName(this.responses[row][this.responseHeaders[this.config.idColumn]], paramName)
+        if (response !== 'Unavailable') {
+          this.opt.addVariable(varName, 0, 1, LinearOptimizationService.VariableType.INTEGER)
+        }
+        if (response === 'Preferred') {
+          this.opt.setObjectiveCoefficient(varName, 1)
+        }
       }
-      if (response === 'Preferred') {
-        opt.setObjectiveCoefficient(varName, 1)
+    }
+  }
+
+  constrainHoursPerPerson() {
+    for (let row = 1; row < this.responses.length; ++row) {
+      const shiftConstraint = this.opt.addConstraint(this.config.minHours, this.config.maxHours)
+      for (const shiftName of Object.keys(this.shifts)) {
+        const response = this.responses[row][this.responseHeaders[shiftName]]
+        const varName = getVariableName(this.responses[row][this.responseHeaders[this.config.idColumn]], shiftName)
+        if (response !== 'Unavailable') {
+          shiftConstraint.setCoefficient(varName, this.shifts[shiftName].hours)
+        }
+      }
+    }
+  }
+
+  constrainCountPerShift() {
+    const idColumnIndex = this.responseHeaders[this.config.idColumn]
+    for (const [shiftName, param] of Object.entries(this.shifts)) {
+      const countConstraint = this.opt.addConstraint(param.min, param.max)
+      const availColumnIndex = this.responseHeaders[shiftName]
+      for (let row = 1; row < this.responses.length; ++row) {
+        if (this.responses[row][availColumnIndex] !== 'Unavailable') {
+          countConstraint.setCoefficient(getVariableName(this.responses[row][idColumnIndex], shiftName), 1)
+        }
+      }
+    }
+  }
+
+  writeSolution(solution: GoogleAppsScript.Optimization.LinearOptimizationSolution) {
+    // To enable us to write into multiple rows efficiently
+    const shiftCounters = {}
+    for (let row = 1; row < this.responses.length; ++row) {
+      for (const [paramName, param] of Object.entries(this.shifts)) {
+        const column = this.responseHeaders[paramName]
+        const person = this.responses[row][this.responseHeaders[this.config.idColumn]]
+        const personDisplayName = this.responses[row][this.responseHeaders[this.config.displayColumn]]
+        // Logger.log({param: paramName, person: person, val: solution.getVariableValue(getVariableName(person, paramName))})
+        if (this.responses[row][column] !== 'Unavailable' && solution.getVariableValue(getVariableName(person, paramName)) > 0) {
+          let count = shiftCounters[paramName]
+          if (count === undefined) {
+            count = 0
+            shiftCounters[paramName] = 0
+          }
+          const sheet = param.outputRange.getSheet()
+          const nameRange = sheet.getRange(param.outputRange.getRow() + count, param.outputRange.getColumn())
+          nameRange.setValue(personDisplayName)
+          if (this.config.preferredGreen && this.responses[row][column] === 'Preferred') {
+            nameRange.setFontColor('#47882b')
+          } else {
+            nameRange.setFontColor(null)
+          }
+          ++shiftCounters[paramName]
+        }
       }
     }
   }
 }
 
-/**
- * @param opt {LinearOptimizationService.LinearOptimizationEngine}
- * @param responses {string[][]}
- * @param headers {{[key: string]: number}}
- * @param params {{[name: string]: any}}
- * @param config {{idColumn: string, minHours: number, maxHours: number}}
- */
-function constrainHoursPerPerson(opt, responses, headers, params, config) {
-  for (let row = 1; row < responses.length; ++row) {
-    const shiftConstraint = opt.addConstraint(config.minHours, config.maxHours)
-    for (const paramName of Object.keys(params)) {
-      const response = responses[row][headers[paramName]]
-      const varName = getVariableName(responses[row][headers[config.idColumn]], paramName)
-      if (response !== 'Unavailable') {
-        shiftConstraint.setCoefficient(varName, params[paramName].hours)
-      }
-    }
-  }
-}
-
-/**
- * @param opt {LinearOptimizationService.LinearOptimizationEngine}
- * @param responses {string[][]}
- * @param headers {{[key: string]: number}}
- * @param params {{[name: string]: {name: string, min: number, max: number}}}
- * @param config {{idColumn: string}}
- */
-function constrainCountPerShift(opt, responses, headers, params, config) {
-  for (const [paramName, param] of Object.entries(params)) {
-    const countConstraint = opt.addConstraint(param.min, param.max)
-    const availColumnIndex = headers[paramName]
-    const idColumnIndex = headers[config.idColumn]
-    for (let row = 1; row < responses.length; ++row) {
-      if (responses[row][availColumnIndex] !== 'Unavailable') {
-        countConstraint.setCoefficient(getVariableName(responses[row][idColumnIndex], paramName), 1)
-      }
-    }
-  }
-}
-/**
- * @param solution {LinearOptimizationService.LinearOptimizationSolution}
- * @param responses {string[][]}
- * @param headers {{[key: string]: number}}
- * @param params {{[name: string]: {name: string, min: number, max: number, outputRange: SpreadsheetApp.Range}}}
- * @param config {{idColumn: string, displayColumn: string, preferredGreen: boolean}}
- */
-function writeSolution(solution, responses, headers, params, config) {
-  // To enable us to write into multiple rows efficiently
-  const shiftCounters = {}
-  for (let row = 1; row < responses.length; ++row) {
-    for (const [paramName, param] of Object.entries(params)) {
-      const column = headers[paramName]
-      const person = responses[row][headers[config.idColumn]]
-      const personDisplayName = responses[row][headers[config.displayColumn]]
-      // Logger.log({param: paramName, person: person, val: solution.getVariableValue(getVariableName(person, paramName))})
-      if (responses[row][column] !== 'Unavailable' && solution.getVariableValue(getVariableName(person, paramName)) > 0) {
-        let count = shiftCounters[paramName]
-        if (count === undefined) {
-          count = 0
-          shiftCounters[paramName] = 0
-        }
-        const sheet = param.outputRange.getSheet()
-        const nameRange = sheet.getRange(param.outputRange.getRow() + count, param.outputRange.getColumn())
-        nameRange.setValue(personDisplayName)
-        if (config.preferredGreen && responses[row][column] === 'Preferred') {
-          nameRange.setFontColor('#47882b')
-        } else {
-          nameRange.setFontColor(null)
-        }
-        ++shiftCounters[paramName]
-      }
-    }
-  }
-}
 
 function runSolver() {
-  const params = collectParams()
-  const responses = collectResponseArray()
-  const opt = LinearOptimizationService.createEngine()
-  const config = collectConfig()
-  opt.setMaximization()
-  const responseHeaders = mapHeaderToIndex(responses[0])
+  const prob = new ShifterProblem()
+  prob.makeAvailabilityVariables()
+  prob.constrainHoursPerPerson()
+  prob.constrainCountPerShift()
 
-  makeAvailableVariables(opt, responses, responseHeaders, params, config)
-  constrainHoursPerPerson(opt, responses, responseHeaders, params, config)
-  constrainCountPerShift(opt, responses, responseHeaders, params, config)
-
-  const solution = opt.solve(60)
+  const solution = prob.opt.solve(60)
   if (solution.isValid()) {
-    writeSolution(solution, responses, responseHeaders, params, config)
+    prob.writeSolution(solution)
     SpreadsheetApp.getUi().alert('Shifter says...', 'Shift scheduling done! ☺️', SpreadsheetApp.getUi().ButtonSet.OK)
   } else {
     SpreadsheetApp.getUi().alert('Shifter says...', 'Failed to solve linear program', SpreadsheetApp.getUi().ButtonSet.OK)
   }
 }
-

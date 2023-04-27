@@ -1,0 +1,13 @@
+lockfileVersion: 5.4
+
+specifiers:
+  '@types/google-apps-script': ^1.0.62
+
+dependencies:
+  '@types/google-apps-script': 1.0.62
+
+packages:
+
+  /@types/google-apps-script/1.0.62:
+    resolution: {integrity: sha512-AMD5PfSnSmt6S2QC9EzJU+giZLO6Ufmv/+AIpeZojgF8ckuq9+A37WGZ6tzmgkPwrtZyqikDQ6DwDyApU1CPzQ==}
+    dev: false
