@@ -68,7 +68,39 @@ function validateParams() {
       expectedShifts.push(params[row][paramHeaderToIndex['Shift']])
     }
 
-    const responseData = responses.getDataRange().getDisplayValues()
+    const deadlineCell = spreadsheet.getRangeByName('Deadline')
+    if (deadlineCell != null) {
+      if (!(deadlineCell.getValue() instanceof Date)) {
+        deadlineCell.activate()
+        throw new Error(`The selected deadline is not a valid date`)
+      }
+
+      const minOnTimePriorityCell = spreadsheet.getRangeByName('MinOnTimePriority')
+      if (minOnTimePriorityCell == null)
+        throw new Error(`You are missing the "MinOnTimePriority" named range, which specifies the priority given to workers who submit at the deadline. Conventionally, its value is somewhere around 0.5.`)
+      if (typeof minOnTimePriorityCell.getValue() !== 'number') {
+        minOnTimePriorityCell.activate()
+        throw new Error(`The minimum priority for on-time submissions must be a number`)
+      }
+
+      const latePriorityCell = spreadsheet.getRangeByName('LatePriority')
+      if (latePriorityCell == null)
+        throw new Error(`You are missing the "LatePriority" named range, which specifies the priority given to workers who submit after the deadline. Conventionally, its value is somewhere around 0.`)
+      if (typeof latePriorityCell.getValue() !== 'number') {
+        latePriorityCell.activate()
+        throw new Error(`The priority given to submissions after the deadline must be a number`)
+      }
+    }
+
+    const additiveRange = spreadsheet.getRangeByName('Additive')
+    if (additiveRange === null)
+      throw new Error('You are missing the "Additive" named range, which specifies whether to add to an existing work schedule or create one from scratch')
+    if (typeof additiveRange.getValue() !== 'boolean') {
+      additiveRange.activate()
+      throw new Error('The "Additive" named range must be a boolean (TRUE or FALSE)')
+    }
+
+    const responseData = responses.getDataRange().getValues()
     const missingShiftData = expectedShifts.filter(shift => !responseData[0].includes(shift))
     if (missingShiftData.length > 0) throw new Error(`You are missing response columns in ${constraintRange.getDisplayValue()} for the specified shifts: ${missingShiftData.join(", ")}`)
     const responseDataHeaders = mapHeaderToIndex(responseData[0])
@@ -108,13 +140,17 @@ function validateParams() {
       throw new Error(`You are missing the "${idColumnRange.getDisplayValue()}" response column, which you have specified as the column with each person's unique ID`)
     if (!responseData[0].includes(displayColumnRange.getDisplayValue()))
       throw new Error(`You are missing the "${displayColumnRange.getDisplayValue()}" response column, which you have specified as the column with each person's display name in the schedule`)
+    if (deadlineCell != null && !responseData[0].includes('Time'))
+      throw new Error(`You are missing the "Time" response column, which is necessary because you have specified a submission deadline`)
     if (new Set(responseData[0]).size !== responseData[0].length)
       throw new Error(`The column headers of the responses sheet are not unique`)
     
     const resIdColumnIndex = responseDataHeaders[idColumnRange.getDisplayValue()]
     const resDisplayColumnIndex = responseDataHeaders[displayColumnRange.getDisplayValue()]
+    // TODO scale this beyond 0-1, like "Available", "Preferred", "Ideal"
     const validAvailability = new Set(['Unavailable', 'Available', 'Preferred'])
     const idSet = new Set()
+    const nameSet = new Set()
     for (let row = 1; row < responseData.length && responseData[row].join('').trim().length > 0; ++row) {
       const rowId = responseData[row][resIdColumnIndex].toString()
       if (rowId.trim().length === 0) {
@@ -124,6 +160,10 @@ function validateParams() {
       if (responseData[row][resDisplayColumnIndex].toString().trim().length === 0) {
         responses.getRange(row + 1, resDisplayColumnIndex + 1).activate()
         throw new Error(`The selected worker display name value is missing`)
+      }
+      if (deadlineCell != null && !(responseData[row][responseDataHeaders['Time']] instanceof Date)) {
+        responses.getRange(row + 1, responseDataHeaders['Time'] + 1).activate()
+        throw new Error(`The selected worker submission time is missing or not a date`)
       }
       let availableSlots = 0
       for (const shift of expectedShifts) {
@@ -144,12 +184,31 @@ function validateParams() {
         throw new Error(`The ID "${rowId}" is duplicated in the responses`)
       }
       idSet.add(rowId)
+
+      const displayName = responseData[row][resDisplayColumnIndex].toString()
+      if (nameSet.has(displayName)) {
+        responses.getRange(row + 1, resDisplayColumnIndex + 1).activate()
+        throw new Error(`The display name "${displayName}" is duplicated in the responses. Because of the mechanism in which the Additive feature reads the existing work schedule, all display names must be unique`)
+      }
+      nameSet.add(displayName)
     }
     
+    if (additiveRange.getValue() === true) {
+      for (let row = 1; params[row][0] != ''; ++row) {
+        let assignTo = config.getRange(params[row][paramHeaderToIndex['Write results to']])
+        while (nameSet.has(assignTo?.getValue())) {
+          assignTo = config.getRange(assignTo.getRow() + 1, assignTo.getColumn())
+        }
+        if (/[a-zA-Z]/.test(assignTo.getValue()?.toString() ?? '')) {
+          assignTo.activate()
+          throw new Error(`${JSON.stringify(assignTo.getValue())} exists in the current schedule but not in the availability responses`)
+        }
+      }
+    }
 
     SpreadsheetApp.getUi().alert('Shifter says...', `Looks good! 👍`, SpreadsheetApp.getUi().ButtonSet.OK)
   } catch (e) {
-    SpreadsheetApp.getUi().alert('Shifter says...', `${e}\n\n${e?.stack}`, SpreadsheetApp.getUi().ButtonSet.OK)
+    SpreadsheetApp.getUi().alert('Shifter has encountered a problem', `${e?.stack}`, SpreadsheetApp.getUi().ButtonSet.OK)
   }
 }
 
@@ -184,11 +243,11 @@ function collectParams() {
   return params
 }
 
-function collectResponseArray(): string[][] {
+function collectResponseArray(): any[][] {
     const spreadsheet = SpreadsheetApp.getActiveSpreadsheet()
     const constraintRange = spreadsheet.getRangeByName('AvailabilityResponses')!
     const responses = spreadsheet.getSheetByName(constraintRange.getDisplayValue())!
-    return responses.getDataRange().getDisplayValues()
+    return responses.getDataRange().getValues()
 }
 
 function getVariableName(person, shift) {
@@ -201,6 +260,12 @@ interface Config {
   preferredGreen: boolean
   minHours: number
   maxHours: number
+  additive: boolean
+  timeScale?: {
+    deadline: Date,
+    minOnTimePriority: number,
+    latePriority: number
+  }
 }
 
 function collectConfig() {
@@ -211,15 +276,44 @@ function collectConfig() {
   const preferredGreen = !['0', '', 'FALSE'].includes(preferredGreenStr.toString().toUpperCase())
   const minHours = spreadsheet.getRangeByName('MinHours')!.getValue()
   const maxHours = spreadsheet.getRangeByName('MaxHours')!.getValue()
-  return {idColumn, displayColumn, preferredGreen, minHours, maxHours}
+  const additive = spreadsheet.getRangeByName('Additive')!.getValue()
+  const config: Config = {idColumn, displayColumn, preferredGreen, minHours, maxHours, additive}
+
+  const deadlineCell = spreadsheet.getRangeByName('Deadline')
+  if (deadlineCell != null) {
+    config.timeScale = {
+      deadline: deadlineCell.getValue() as Date,
+      minOnTimePriority: spreadsheet.getRangeByName('MinOnTimePriority')!.getValue() as number,
+      latePriority: spreadsheet.getRangeByName('LatePriority')!.getValue() as number
+    }
+  }
+  return config
+}
+
+function readCurrentAssignments(problem: ShifterProblem): {[shiftName: string]: string[]} {
+  const displayNameMapping = Object.fromEntries(
+    problem.responses.map(row => 
+      [row[problem.responseHeaders[problem.config.displayColumn]], row[problem.responseHeaders[problem.config.idColumn]]]))
+  const currentAssignments: {[shiftName: string]: string[]} = {}
+
+  for (const [shiftName, params] of Object.entries(problem.shifts)) {
+    currentAssignments[shiftName] = []
+    for (let item = params.outputRange; item?.getValue() in displayNameMapping; item = item.getSheet().getRange(item.getRow() + 1, item.getColumn())) {
+      currentAssignments[shiftName].push(displayNameMapping[item.getValue()])
+    }
+  }
+  SpreadsheetApp.getUi().alert(JSON.stringify(currentAssignments, null, 2))
+  return currentAssignments
 }
 
 class ShifterProblem {
   shifts: {[shiftName: string]: ShiftParams}
-  responses: string[][]
+  responses: any[][]
+  currentAssignments?: {[task: string]: string[]}
   opt: GoogleAppsScript.Optimization.LinearOptimizationEngine
   config: Config
   responseHeaders: {[header: string]: number}
+  earliestTime?: number = undefined
 
   constructor() {
     this.shifts = collectParams()
@@ -228,6 +322,9 @@ class ShifterProblem {
     this.config = collectConfig()
     this.opt.setMaximization()
     this.responseHeaders = mapHeaderToIndex(this.responses[0])
+    if (this.config.additive) {
+      this.currentAssignments = readCurrentAssignments(this)
+    }
   }
 
   makeAvailabilityVariables() {
@@ -239,10 +336,29 @@ class ShifterProblem {
           this.opt.addVariable(varName, 0, 1, LinearOptimizationService.VariableType.INTEGER)
         }
         if (response === 'Preferred') {
-          this.opt.setObjectiveCoefficient(varName, 1)
+          if (this.config.timeScale == null) {
+            this.opt.setObjectiveCoefficient(varName, 1)
+          } else {
+            const submissionTime = this.responses[row][this.responseHeaders['Time']]
+            this.opt.setObjectiveCoefficient(varName, this.scaleSubmissionTimeToWeight(submissionTime))
+          }
         }
       }
     }
+  }
+
+  private scaleSubmissionTimeToWeight(time: Date) {
+    if (this.config.timeScale == null) return 1
+    // cached
+    this.earliestTime ??= this.responses.slice(1)
+      .map(row => row[this.responseHeaders['Time']].getTime())
+      .reduce((a, b) => Math.min(a, b))
+    const deadline = this.config.timeScale.deadline.getTime()
+    if (time.getTime() > deadline) return this.config.timeScale.latePriority
+
+    // (earliest) 0 -> 1 (latest)
+    // (earliest) 1 -> minOnTimePriority (latest)
+    return 1 - (time.getTime() - this.earliestTime!) / (deadline - this.earliestTime!) * (1 - this.config.timeScale.minOnTimePriority)
   }
 
   constrainHoursPerPerson() {
@@ -266,6 +382,19 @@ class ShifterProblem {
       for (let row = 1; row < this.responses.length; ++row) {
         if (this.responses[row][availColumnIndex] !== 'Unavailable') {
           countConstraint.setCoefficient(getVariableName(this.responses[row][idColumnIndex], shiftName), 1)
+        }
+      }
+    }
+  }
+
+  constrainExistingAssignmentsIfAdditive() {
+    if (this.currentAssignments) {
+      // We opt for a single constraint where the sum of all the existing assignments' variables should be their count
+      const existingAssignmentCount = Object.values(this.currentAssignments).reduce((a, b) => a + b.length, 0)
+      const existingConstraint = this.opt.addConstraint(existingAssignmentCount, existingAssignmentCount)
+      for (const [shiftName, ids] of Object.entries(this.currentAssignments)) {
+        for (const id of ids) {
+          existingConstraint.setCoefficient(getVariableName(id, shiftName), 1)
         }
       }
     }
@@ -307,6 +436,7 @@ function runSolver() {
   prob.makeAvailabilityVariables()
   prob.constrainHoursPerPerson()
   prob.constrainCountPerShift()
+  prob.constrainExistingAssignmentsIfAdditive()
 
   const solution = prob.opt.solve(60)
   if (solution.isValid()) {
@@ -316,3 +446,8 @@ function runSolver() {
     SpreadsheetApp.getUi().alert('Shifter says...', 'Failed to solve linear program', SpreadsheetApp.getUi().ButtonSet.OK)
   }
 }
+
+// TEST CASES
+// Validate: Check duplicate display names
+// Validate: Check presence of "Additive" named range and that it is a boolean
+// Validate: Check validity of all display names in the output section if Additive
