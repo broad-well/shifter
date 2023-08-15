@@ -105,12 +105,15 @@ function validateParams() {
     if (missingShiftData.length > 0) throw new Error(`You are missing response columns in ${constraintRange.getDisplayValue()} for the specified shifts: ${missingShiftData.join(", ")}`)
     const responseDataHeaders = mapHeaderToIndex(responseData[0])
 
+    const knownCategories: Set<string> = new Set()
+
     // Check parameters
     for (let row = 1; params[row][0] != ''; ++row) {
       const minVal = params[row][paramHeaderToIndex['Minimum assigned']]
       const maxVal = params[row][paramHeaderToIndex['Maximum assigned']]
       const hours = params[row][paramHeaderToIndex['Hours']]
       const assignTo = params[row][paramHeaderToIndex['Write results to']]
+      const category = params[row][paramHeaderToIndex['Category']]
       const allDigits = /^\d+$/
       if (minVal.match(allDigits) === null) {
         paramsRange.getCell(row + 1, paramHeaderToIndex['Minimum assigned'] + 1).activate()
@@ -134,6 +137,7 @@ function validateParams() {
         paramsRange.getCell(row + 1, paramHeaderToIndex['Write results to'] + 1).activate()
         throw new Error(`The selected cell is not in proper A1 notation`)
       }
+      knownCategories.add(category)
     }
     
     if (!responseData[0].includes(idColumnRange.getDisplayValue()))
@@ -147,6 +151,8 @@ function validateParams() {
     
     const resIdColumnIndex = responseDataHeaders[idColumnRange.getDisplayValue()]
     const resDisplayColumnIndex = responseDataHeaders[displayColumnRange.getDisplayValue()]
+    const resReqCategoryColumnIndex = responseDataHeaders['Category']
+
     // TODO scale this beyond 0-1, like "Available", "Preferred", "Ideal"
     const validAvailability = new Set(['Unavailable', 'Available', 'Preferred'])
     const idSet = new Set()
@@ -191,6 +197,18 @@ function validateParams() {
         throw new Error(`The display name "${displayName}" is duplicated in the responses. Because of the mechanism in which the Additive feature reads the existing work schedule, all display names must be unique`)
       }
       nameSet.add(displayName)
+
+      if (resReqCategoryColumnIndex != undefined) {
+        const reqCategory: string|undefined = responseData[row][resReqCategoryColumnIndex]?.toString()
+        if (reqCategory != null && reqCategory.length > 0) {
+          const categories = reqCategory.split(/\s*,\s*/)
+          const unknownCategory = categories.find(category => !knownCategories.has(category))
+          if (unknownCategory !== undefined) {
+            responses.getRange(row + 1, resReqCategoryColumnIndex + 1).activate()
+            throw new Error(`The mentioned category "${unknownCategory}" in the selected cell is unknown. Is it a typo?`)
+          }
+        }
+      }
     }
     
     if (additiveRange.getValue() === true) {
@@ -250,7 +268,7 @@ function collectResponseArray(): any[][] {
     return responses.getDataRange().getValues()
 }
 
-function getVariableName(person, shift) {
+function getVariableName(person: string, shift: string) {
   return `${person}_${shift}`
 }
 
@@ -302,7 +320,6 @@ function readCurrentAssignments(problem: ShifterProblem): {[shiftName: string]: 
       currentAssignments[shiftName].push(displayNameMapping[item.getValue()])
     }
   }
-  SpreadsheetApp.getUi().alert(JSON.stringify(currentAssignments, null, 2))
   return currentAssignments
 }
 
@@ -328,23 +345,37 @@ class ShifterProblem {
   }
 
   makeAvailabilityVariables() {
+    // For all workers
     for (let row = 1; row < this.responses.length; ++row) {
+      // For all shifts
       for (const paramName of Object.keys(this.shifts)) {
         const response = this.responses[row][this.responseHeaders[paramName]]
-        const varName = getVariableName(this.responses[row][this.responseHeaders[this.config.idColumn]], paramName)
-        if (response !== 'Unavailable') {
-          this.opt.addVariable(varName, 0, 1, LinearOptimizationService.VariableType.INTEGER)
-        }
-        if (response === 'Preferred') {
-          if (this.config.timeScale == null) {
-            this.opt.setObjectiveCoefficient(varName, 1)
-          } else {
-            const submissionTime = this.responses[row][this.responseHeaders['Time']]
-            this.opt.setObjectiveCoefficient(varName, this.scaleSubmissionTimeToWeight(submissionTime))
+        const shiftCategory = this.shifts[paramName].category
+        const categoryPermitted = this.isCategoryPermitted(this.responses[row], shiftCategory)
+        if (categoryPermitted) {
+          const varName = getVariableName(this.responses[row][this.responseHeaders[this.config.idColumn]], paramName)
+          if (response !== 'Unavailable') {
+            this.opt.addVariable(varName, 0, 1, LinearOptimizationService.VariableType.INTEGER)
+          }
+          if (response === 'Preferred') {
+            if (this.config.timeScale == null) {
+              this.opt.setObjectiveCoefficient(varName, 1)
+            } else {
+              const submissionTime = this.responses[row][this.responseHeaders['Time']]
+              this.opt.setObjectiveCoefficient(varName, this.scaleSubmissionTimeToWeight(submissionTime))
+            }
           }
         }
       }
     }
+  }
+
+  private isCategoryPermitted(responseRow: any[], category: string): boolean {
+    const categoryColumnIndex = this.responseHeaders['Category']
+    if (categoryColumnIndex == undefined) return true
+    const reqCategory = responseRow[categoryColumnIndex]
+    if (reqCategory == undefined || reqCategory === '') return true
+    return reqCategory.includes(category)
   }
 
   private scaleSubmissionTimeToWeight(time: Date) {
@@ -367,7 +398,7 @@ class ShifterProblem {
       for (const shiftName of Object.keys(this.shifts)) {
         const response = this.responses[row][this.responseHeaders[shiftName]]
         const varName = getVariableName(this.responses[row][this.responseHeaders[this.config.idColumn]], shiftName)
-        if (response !== 'Unavailable') {
+        if (response !== 'Unavailable' && this.isCategoryPermitted(this.responses[row], this.shifts[shiftName].category)) {
           shiftConstraint.setCoefficient(varName, this.shifts[shiftName].hours)
         }
       }
@@ -380,7 +411,7 @@ class ShifterProblem {
       const countConstraint = this.opt.addConstraint(param.min, param.max)
       const availColumnIndex = this.responseHeaders[shiftName]
       for (let row = 1; row < this.responses.length; ++row) {
-        if (this.responses[row][availColumnIndex] !== 'Unavailable') {
+        if (this.responses[row][availColumnIndex] !== 'Unavailable' && this.isCategoryPermitted(this.responses[row], param.category)) {
           countConstraint.setCoefficient(getVariableName(this.responses[row][idColumnIndex], shiftName), 1)
         }
       }
@@ -409,7 +440,7 @@ class ShifterProblem {
         const person = this.responses[row][this.responseHeaders[this.config.idColumn]]
         const personDisplayName = this.responses[row][this.responseHeaders[this.config.displayColumn]]
         // Logger.log({param: paramName, person: person, val: solution.getVariableValue(getVariableName(person, paramName))})
-        if (this.responses[row][column] !== 'Unavailable' && solution.getVariableValue(getVariableName(person, paramName)) > 0) {
+        if (this.responses[row][column] !== 'Unavailable' && this.isCategoryPermitted(this.responses[row], param.category) && solution.getVariableValue(getVariableName(person, paramName)) > 0) {
           let count = shiftCounters[paramName]
           if (count === undefined) {
             count = 0
@@ -451,3 +482,4 @@ function runSolver() {
 // Validate: Check duplicate display names
 // Validate: Check presence of "Additive" named range and that it is a boolean
 // Validate: Check validity of all display names in the output section if Additive
+// Validate: Unknown category name in Category column
