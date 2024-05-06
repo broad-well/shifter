@@ -1,3 +1,9 @@
+const objectiveTiers: {[tier: string]: {obj: number, green: boolean}} = {
+  'Available': {obj: 0, green: false},
+  'Preferred': {obj: 1, green: true},
+  'Recommended': {obj: 3, green: true}
+}
+
 function onOpen() {
   const ui = SpreadsheetApp.getUi()
   ui.createMenu('Shifter')
@@ -154,7 +160,7 @@ function validateParams() {
     const resReqCategoryColumnIndex = responseDataHeaders['Category']
 
     // TODO scale this beyond 0-1, like "Available", "Preferred", "Ideal"
-    const validAvailability = new Set(['Unavailable', 'Available', 'Preferred'])
+    const validAvailability = new Set(['Unavailable', ...Object.keys(objectiveTiers)])
     const idSet = new Set()
     const nameSet = new Set()
     for (let row = 1; row < responseData.length && responseData[row].join('').trim().length > 0; ++row) {
@@ -357,12 +363,13 @@ class ShifterProblem {
           if (response !== 'Unavailable') {
             this.opt.addVariable(varName, 0, 1, LinearOptimizationService.VariableType.INTEGER)
           }
-          if (response === 'Preferred') {
+          const tier = objectiveTiers[response]
+          if (tier !== undefined) {
             if (this.config.timeScale == null) {
-              this.opt.setObjectiveCoefficient(varName, 1)
+              this.opt.setObjectiveCoefficient(varName, tier.obj)
             } else {
               const submissionTime = this.responses[row][this.responseHeaders['Time']]
-              this.opt.setObjectiveCoefficient(varName, this.scaleSubmissionTimeToWeight(submissionTime))
+              this.opt.setObjectiveCoefficient(varName, tier.obj * this.scaleSubmissionTimeToWeight(submissionTime))
             }
           }
         }
@@ -449,7 +456,7 @@ class ShifterProblem {
           const sheet = param.outputRange.getSheet()
           const nameRange = sheet.getRange(param.outputRange.getRow() + count, param.outputRange.getColumn())
           nameRange.setValue(personDisplayName)
-          if (this.config.preferredGreen && this.responses[row][column] === 'Preferred') {
+          if (this.config.preferredGreen && objectiveTiers[this.responses[row][column]]?.green) {
             nameRange.setFontColor('#47882b')
           } else {
             nameRange.setFontColor(null)
