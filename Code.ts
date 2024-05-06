@@ -114,7 +114,11 @@ function validateParams() {
     const knownCategories: Set<string> = new Set()
 
     // Check parameters
+    const shiftMin = {}
+    const shiftMax = {}
+    const shiftsInCategory: {[category: string]: Set<string>} = {}
     for (let row = 1; params[row][0] != ''; ++row) {
+      const shiftName = params[row][paramHeaderToIndex['Shift']]
       const minVal = params[row][paramHeaderToIndex['Minimum assigned']]
       const maxVal = params[row][paramHeaderToIndex['Maximum assigned']]
       const hours = params[row][paramHeaderToIndex['Hours']]
@@ -144,6 +148,10 @@ function validateParams() {
         throw new Error(`The selected cell is not in proper A1 notation`)
       }
       knownCategories.add(category)
+      shiftMin[shiftName] = minVal
+      shiftMax[shiftName] = maxVal
+      if (shiftsInCategory[category] === undefined) shiftsInCategory[category] = new Set()
+      shiftsInCategory[category].add(shiftName)
     }
     
     if (!responseData[0].includes(idColumnRange.getDisplayValue()))
@@ -159,10 +167,10 @@ function validateParams() {
     const resDisplayColumnIndex = responseDataHeaders[displayColumnRange.getDisplayValue()]
     const resReqCategoryColumnIndex = responseDataHeaders['Category']
 
-    // TODO scale this beyond 0-1, like "Available", "Preferred", "Ideal"
     const validAvailability = new Set(['Unavailable', ...Object.keys(objectiveTiers)])
     const idSet = new Set()
     const nameSet = new Set()
+    const availableCount = {}
     for (let row = 1; row < responseData.length && responseData[row].join('').trim().length > 0; ++row) {
       const rowId = responseData[row][resIdColumnIndex].toString()
       if (rowId.trim().length === 0) {
@@ -185,7 +193,11 @@ function validateParams() {
           responses.getRange(row + 1, column + 1).activate()
           throw new Error(`The selected worker availability value is invalid. Valid values are: ${Array.from(validAvailability).join(', ')}`)
         }
-        if (availability !== 'Unavailable') ++availableSlots
+        if (availability !== 'Unavailable') {
+          ++availableSlots
+          if (availableCount[shift] === undefined) availableCount[shift] = 0
+          ++availableCount[shift]
+        }
       }
       if (availableSlots === 0) {
         responses.getRange(row + 1, resIdColumnIndex + 1).activate()
@@ -213,10 +225,33 @@ function validateParams() {
             responses.getRange(row + 1, resReqCategoryColumnIndex + 1).activate()
             throw new Error(`The mentioned category "${unknownCategory}" in the selected cell is unknown. Is it a typo?`)
           }
+          // Ensure that the respondent has at least 1 non-Unavailable response under the categories selected
+          let availableHere = false
+          for (const category of categories) {
+            for (const shift of shiftsInCategory[category]) {
+              const column = responseDataHeaders[shift]
+              if (responseData[row][column] !== 'Unavailable') {
+                availableHere = true
+                break
+              }
+            }
+            if (availableHere) break
+          }
+          if (!availableHere) {
+            const name = responseData[row][resDisplayColumnIndex].toString()
+            throw new Error(`${name} is restricted to ${categories.join(', ')}, but they are Unavailable for all of these categories' shifts`)
+          }
         }
       }
     }
-    
+
+    // Check that each shift has enough members available
+    for (const shiftKind of expectedShifts) {
+      if (availableCount[shiftKind] < shiftMin[shiftKind]) {
+        throw new Error(`Shift "${shiftKind}" requires a minimum of ${shiftMin[shiftKind]} members, but only ${availableCount[shiftKind]} members are not Unavailable for it (this is not enough)`)
+      }
+    }
+
     if (additiveRange.getValue() === true) {
       for (let row = 1; params[row][0] != ''; ++row) {
         let assignTo = config.getRange(params[row][paramHeaderToIndex['Write results to']])
@@ -226,7 +261,7 @@ function validateParams() {
         if (/[a-zA-Z]/.test(assignTo.getValue()?.toString() ?? '')) {
           assignTo.activate()
           throw new Error(`${JSON.stringify(assignTo.getValue())} exists in the current schedule but not in the availability responses`)
-        }
+        }  
       }
     }
 
@@ -490,3 +525,5 @@ function runSolver() {
 // Validate: Check presence of "Additive" named range and that it is a boolean
 // Validate: Check validity of all display names in the output section if Additive
 // Validate: Unknown category name in Category column
+// Validate: Nobody is available for a shift with a minimum member count of 1
+// Validate: Someone is unavailable for all shifts under their selected categories
